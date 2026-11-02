@@ -55,6 +55,8 @@ function windowToken() {
  * from an earlier start reaches it too). A path too long for a socket goes in this user's own temp folder.
  */
 function renderSocket() {
+  // Windows has no Unix sockets: a named pipe, one per Windows user.
+  if (WIN) return `\\\\.\\pipe\\bops-render-${os.userInfo().username}`;
   const file = path.join(app.getPath("userData"), "render.sock");
   return Buffer.byteLength(file) < 100 ? file : path.join(os.tmpdir(), "bops-render.sock");
 }
@@ -103,12 +105,16 @@ const output = (file, args, timeout = 3000) =>
  * it's taken as soon as it arrives, even when the rc left a background job holding the output open.
  * Asked once per launch; a server started again later uses the same.
  */
+/** Running on Windows: no login shell, no lsof, no process groups, no symlinks without admin. */
+const WIN = process.platform === "win32";
 const FALLBACK_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 const PATH_MARK = "__BOPS_PATH__";
 let shellPath;
 /** The login shell still being asked, so quitting can stop it. */
 let pathProbe;
 function loginPath() {
+  // Windows apps get the user's full PATH already: there's no login shell to ask.
+  if (WIN) return (shellPath ??= Promise.resolve(process.env.PATH ?? ""));
   shellPath ??= new Promise((resolve) => {
     const fallback = [...new Set([...(process.env.PATH ?? "").split(":").filter(Boolean), ...FALLBACK_PATH])].join(":");
     let out = "";
@@ -225,6 +231,8 @@ async function whoAnswers() {
  * its id, name, user, parent and folder. Null when there's none, or it can't be seen (another user's).
  */
 async function listener() {
+  // No lsof on Windows: a server left on the port is reported, not stopped (the trouble page says so).
+  if (WIN) return null;
   const out = (await output("lsof", ["-b", "-w", "-nP", `-iTCP:${PORT}`, "-sTCP:LISTEN", "-Fpc"])) ?? "";
   // One entry per process ("p<pid>" then "c<name>"); a port can have more than one (127.0.0.1 and ::1).
   const found = [...out.matchAll(/^p(\d+)\n(?:c(.*))?/gm)].map((m) => ({ pid: Number(m[1]), name: m[2] || "a program" })).filter((l) => l.pid > 1);
@@ -308,9 +316,11 @@ function packagedServer() {
     const link = path.join(home, name);
     const st = fs.lstatSync(link, { throwIfNoEntry: false });
     if (st && !st.isSymbolicLink()) continue;
-    if (st && fs.readlinkSync(link) === path.join(dir, name)) continue;
+    if (st && path.resolve(fs.readlinkSync(link)) === path.resolve(path.join(dir, name))) continue;
     if (st) fs.unlinkSync(link);
-    fs.symlinkSync(path.join(dir, name), link);
+    // Windows: a folder links as a junction (no admin needed), a file is copied (a file symlink needs admin).
+    if (WIN && !fs.statSync(path.join(dir, name)).isDirectory()) fs.copyFileSync(path.join(dir, name), link);
+    else fs.symlinkSync(path.join(dir, name), link, WIN ? "junction" : undefined);
   }
   // Settings for this Mac (self-hosting, testing) go in ~/Library/Application Support/Bops/.env.local;
   // the app itself ships with no keys.
@@ -384,13 +394,17 @@ async function spawnServer() {
           HOSTNAME: packaged.env.BOPS_LISTEN_ALL === "1" ? "0.0.0.0" : "127.0.0.1",
         },
         stdio: ["ignore", packaged.log, packaged.log],
-        detached: true,
+        detached: !WIN,
+        windowsHide: true,
       })
     : spawn("npx", ["next", "dev", "--port", String(PORT)], {
         cwd: REPO,
         env: { ...process.env, PATH, BOPS_UI_TOKEN: windowToken(), BOPS_RENDER_SOCKET: renderSocket() },
         stdio: "ignore",
-        detached: true,
+        detached: !WIN,
+        // npx is npx.cmd on Windows, which Node only runs through a shell.
+        shell: WIN,
+        windowsHide: true,
       });
   if (packaged) fs.closeSync(packaged.log);
   server = child;
@@ -1433,7 +1447,10 @@ app.on("will-quit", () => {
   // A server too stuck to act on SIGTERM would outlive Bops: stopped hard once its exit work's 8s are up.
   if (stopServer() && pid)
     try {
-      spawn("/bin/sh", ["-c", `sleep 10; kill -KILL -${pid} 2>/dev/null || kill -KILL ${pid} 2>/dev/null`], { detached: true, stdio: "ignore" }).unref();
+      (WIN
+        ? spawn("cmd.exe", ["/d", "/c", `ping -n 11 127.0.0.1 >nul & taskkill /T /F /PID ${pid} >nul 2>&1`], { detached: true, stdio: "ignore", windowsHide: true })
+        : spawn("/bin/sh", ["-c", `sleep 10; kill -KILL -${pid} 2>/dev/null || kill -KILL ${pid} 2>/dev/null`], { detached: true, stdio: "ignore" })
+      ).unref();
     } catch {}
   // A login shell still being asked for its PATH (a stuck ~/.zshrc) goes too.
   if (pathProbe)

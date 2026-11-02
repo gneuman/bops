@@ -14,7 +14,9 @@
     "app:build": "node -e \"require('fs').writeFileSync('desktop/repo.json', JSON.stringify({ path: process.cwd() }))\" && electron-builder --mac --dir -c.mac.identity=null",
     "app:install": "npm run app:build && rm -rf /Applications/Bops.app && ditto dist-desktop/mac-arm64/Bops.app /Applications/Bops.app",
     "fast": "next build && next start --port 3210",
-    "app:release": "scripts/release.sh"
+    "app:release": "scripts/release.sh",
+    "app:build:win": "node -e \"require('fs').writeFileSync('desktop/repo.json', JSON.stringify({ path: process.cwd() }))\" && electron-builder --win --dir",
+    "app:dist:win": "next build && electron-builder --win"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
@@ -155,6 +157,22 @@
     },
     "dmg": {
       "sign": false
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "desktop/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }

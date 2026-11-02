@@ -6,18 +6,25 @@ import { spawn, type ChildProcess } from "node:child_process";
  * mid-task stops the task with it: its model call waits out its 5 minutes and the thread says it's
  * stuck. While any task holds it, `caffeinate -i` keeps the Mac from idle sleep (the display may still
  * sleep, and closing the lid on battery still sleeps it); it ends with the last task, or with this server
- * (-w). Not on a hosted server (Linux), or with BOPS_KEEP_AWAKE=0.
+ * (-w). On Windows, a hidden PowerShell holds SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+ * until it is stopped or this server ends. Not on a hosted server (Linux), or with BOPS_KEEP_AWAKE=0.
  */
 
 let holders = 0;
+/** Windows' caffeinate: keeps the PC from idle sleep while it runs, and ends with the server (Wait-Process). */
+const WIN_AWAKE = (pid: number) =>
+  `Add-Type -Name P -Namespace BopsAwake -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'; [BopsAwake.P]::SetThreadExecutionState(0x80000001) | Out-Null; Wait-Process -Id ${pid}`;
 let caffeinate: ChildProcess | undefined;
 
 /** Hold the Mac awake; call what it returns to let go (once is enough, twice does nothing). */
 export function holdAwake(): () => void {
-  if (process.platform !== "darwin" || process.env.BOPS_KEEP_AWAKE === "0") return () => {};
+  const win = process.platform === "win32";
+  if ((process.platform !== "darwin" && !win) || process.env.BOPS_KEEP_AWAKE === "0") return () => {};
   holders++;
   if (!caffeinate) {
-    const c = spawn("/usr/bin/caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore" });
+    const c = win
+      ? spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN_AWAKE(process.pid)], { stdio: "ignore", windowsHide: true })
+      : spawn("/usr/bin/caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore" });
     c.on("error", () => caffeinate === c && (caffeinate = undefined));
     c.on("exit", () => caffeinate === c && (caffeinate = undefined));
     caffeinate = c;
